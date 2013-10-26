@@ -478,11 +478,12 @@ void send_failed(DictionaryIterator *failed, AppMessageResult reason, void *cont
 	
 	if(reason == APP_MSG_SEND_TIMEOUT) {
 		text_layer_set_text(&text_status_layer, "T.Out");
+		if(inTimeOut == 0) {
+			inTimeOut = 1;
+		}
 		if(inTimeOut == 1) {
 			vibes_double_pulse();
 			inTimeOut = 2;
-		} else {
-			inTimeOut = 1;
 		}
 	}
 	
