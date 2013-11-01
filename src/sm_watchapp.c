@@ -33,25 +33,25 @@ PBL_APP_INFO(MY_UUID,
 typedef enum {MUSIC_LAYER, LOCATION_LAYER, NUM_LAYERS} AnimatedLayers;
  
  
-AppMessageResult sm_message_out_get(DictionaryIterator **iter_out);
-void reset_sequence_number();
+static AppMessageResult sm_message_out_get(DictionaryIterator **iter_out);
+static void reset_sequence_number();
 // char* int_to_str(int num, char *outbuf);
-void sendCommand(int key);
-void sendCommandInt(int key, int param);
-void rcv(DictionaryIterator *received, void *context);
-void dropped(void *context, AppMessageResult reason);
-void select_up_handler(ClickRecognizerRef recognizer, Window *window);
-void select_down_handler(ClickRecognizerRef recognizer, Window *window);
-void up_single_click_handler(ClickRecognizerRef recognizer, Window *window);
-void down_single_click_handler(ClickRecognizerRef recognizer, Window *window);
-void config_provider(ClickConfig **config, Window *window);
-void battery_layer_update_callback(Layer *me, GContext* ctx);
-void handle_status_appear(Window *window);
-void handle_status_disappear(Window *window);
-void handle_init(AppContextRef ctx);
-void handle_minute_tick(AppContextRef ctx, PebbleTickEvent *t);
-void handle_deinit(AppContextRef ctx);  
-void reset();   
+static void sendCommand(int key);
+static void sendCommandInt(int key, int param);
+static void rcv(DictionaryIterator *received, void *context);
+static void dropped(void *context, AppMessageResult reason);
+static void select_up_handler(ClickRecognizerRef recognizer, Window *window);
+static void select_down_handler(ClickRecognizerRef recognizer, Window *window);
+static void up_single_click_handler(ClickRecognizerRef recognizer, Window *window);
+static void down_single_click_handler(ClickRecognizerRef recognizer, Window *window);
+static void config_provider(ClickConfig **config, Window *window);
+static void battery_layer_update_callback(Layer *me, GContext* ctx);
+static void handle_status_appear(Window *window);
+static void handle_status_disappear(Window *window);
+static void handle_init(AppContextRef ctx);
+static void handle_minute_tick(AppContextRef ctx, PebbleTickEvent *t);
+static void handle_deinit(AppContextRef ctx);  
+static void reset();   
      
 AppContextRef g_app_context;
  
@@ -75,6 +75,7 @@ static int32_t updateGPSInterval = GPS_UPDATE_INTERVAL;
 static bool connected = 0;
 static bool inTimeOut = 0;
 static bool inGPSUpdate = 0;
+static bool sending = 0;
  
 static char string_buffer[STRING_LENGTH], location_street_str[STRING_LENGTH], appointment_time[15];
 static char weather_cond_str[STRING_LENGTH], weather_tomorrow_temp_str[STRING_LENGTH], weather_temp_str[5];
@@ -112,7 +113,7 @@ const int WEATHER_SMALL_IMG_IDS[] = {
 static uint32_t s_sequence_number = 0xFFFFFFFE;
  
 /* Convert letter to digit */
-int letter2digit(char letter) {
+uint32_t letter2digit(char letter) {
     if((letter >= 48) && (letter <=57)) {
         return letter - 48;
     }
@@ -121,7 +122,7 @@ int letter2digit(char letter) {
 }
  
 /* Convert string to number */
-int string2number(char *string) {
+static uint32_t string2number(char *string) {
     int32_t result = 0;
     int32_t offset = strlen(string) - 1;
     int32_t digit = -1;
@@ -140,7 +141,7 @@ int string2number(char *string) {
 }
  
 /* Convert time string ("HH:MM") to number of minutes */
-int timestr2minutes(char *timestr) {
+static uint32_t timestr2minutes(char *timestr) {
 	static char hourStr[3], minStr[3];
 	int32_t hour, min;
 	int8_t hDigits = 2;
@@ -159,20 +160,24 @@ int timestr2minutes(char *timestr) {
 	return min + (hour * 60);
 }
  
-void apptDisplay() {
+static void apptDisplay() {
 	int32_t apptInMinutes, timeInMinutes;
 	static char date_time_for_appt[] = "00/00 00:00";
 	PblTm t;
 	
 	get_time(&t);
+	
+	string_format_time(date_time_for_appt, sizeof(date_time_for_appt), "%m/%d", &t);
+	
+	if(strncmp(date_time_for_appt, appointment_time, 5) != 0) {
+		layer_set_hidden(&calendar_layer, 1);
+		return;
+	}
 
 	/* Manage appoitment notification */
 	apptInMinutes = timestr2minutes(appointment_time + 6);
 	if(apptInMinutes >= 0) {
 		timeInMinutes = (t.tm_hour * 60) + t.tm_min;
-		//if(apptInMinutes < timeInMinutes) {
-			//layer_set_hidden(&calendar_layer, 1); 	
-		//}
 		if(apptInMinutes < timeInMinutes) {
 			snprintf(date_time_for_appt, 11, "%d min in", (int)(timeInMinutes - apptInMinutes));
 			text_layer_set_text(&calendar_date_layer, date_time_for_appt); 	
@@ -198,6 +203,8 @@ void apptDisplay() {
 			vibes_short_pulse();
 		}
 	}
+	
+	layer_set_hidden(&calendar_layer, 0);
 }
  
 // Analog watch code.....
@@ -277,7 +284,7 @@ static void date_update_proc(Layer* me, GContext* ctx) {
  
 // Communication functions
  
-AppMessageResult sm_message_out_get(DictionaryIterator **iter_out) {
+static AppMessageResult sm_message_out_get(DictionaryIterator **iter_out) {
     AppMessageResult result = app_message_out_get(iter_out);
     if(result != APP_MSG_OK) return result;
     dict_write_int32(*iter_out, SM_SEQUENCE_NUMBER_KEY, ++s_sequence_number);
@@ -288,7 +295,7 @@ AppMessageResult sm_message_out_get(DictionaryIterator **iter_out) {
     return APP_MSG_OK;
 }
  
-void reset_sequence_number() {
+static void reset_sequence_number() {
     DictionaryIterator *iter = NULL;
     app_message_out_get(&iter);
     if(!iter) return;
@@ -298,33 +305,40 @@ void reset_sequence_number() {
 }
  
  
-void sendCommand(int key) {
-    DictionaryIterator* iterout;
+static void sendCommand(int key) {
+	if(sending == 1) return;
+
+	DictionaryIterator* iterout;
     sm_message_out_get(&iterout);
     if(!iterout) return;
      
+	sending = 1;
     dict_write_int8(iterout, key, -1);
     app_message_out_send();
     app_message_out_release();  
 }
  
  
-void sendCommandInt(int key, int param) {
+static void sendCommandInt(int key, int param) {
+	if(sending == 1) return;
+	
     DictionaryIterator* iterout;
     sm_message_out_get(&iterout);
     if(!iterout) return;
      
+	sending = 1;
     dict_write_int8(iterout, key, param);
     app_message_out_send();
     app_message_out_release();  
 }
  
-void rcv(DictionaryIterator *received, void *context) {
+static void rcv(DictionaryIterator *received, void *context) {
 	// Got a message callback
 	Tuple *t;
 	int interval;
 	
 	connected = 1;
+	inTimeOut = 0;
 
 	t=dict_find(received, SM_COUNT_BATTERY_KEY); 
 	if (t!=NULL) {
@@ -396,10 +410,10 @@ void rcv(DictionaryIterator *received, void *context) {
         calendar_text_str[strlen(t->value->cstring)] = '\0';
 		text_layer_set_text(&calendar_text_layer, calendar_text_str); 	
 		
-		if(strlen(calendar_text_str) <= 15)
+		if(strlen(calendar_text_str) <= 14)
 			text_layer_set_font(&calendar_text_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24));
 		else
-			if(strlen(calendar_text_str) <= 18)
+			if(strlen(calendar_text_str) <= 16)
 				text_layer_set_font(&calendar_text_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
 			else 
 				text_layer_set_font(&calendar_text_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
@@ -444,7 +458,7 @@ void rcv(DictionaryIterator *received, void *context) {
 	}
 }
  
-void dropped(void *context, AppMessageResult reason){
+static void dropped(void *context, AppMessageResult reason){
 	// DO SOMETHING WITH THE DROPPED REASON / DISPLAY AN ERROR / RESEND 
 	text_layer_set_text(&text_status_layer, "Drop.");
 	
@@ -460,13 +474,15 @@ void dropped(void *context, AppMessageResult reason){
 	timerRecoveryAttempt = app_timer_send_event(g_app_context, RECOVERY_ATTEMPT_INTERVAL, TIMER_COOKIE_CONNECTIONRECOVER);
 }
  
-void sent_ok(DictionaryIterator *sent, void *context) {
+static void sent_ok(DictionaryIterator *sent, void *context) {
+	sending = 0;
     text_layer_set_text(&text_status_layer, "Ok");
     connected = 1;
-	inTimeOut = 0;
 }
  
-void send_failed(DictionaryIterator *failed, AppMessageResult reason, void *context) {
+static void send_failed(DictionaryIterator *failed, AppMessageResult reason, void *context) {
+	sending = 0;
+
 	text_layer_set_text(&text_status_layer, "Err.");
 	
 	if(reason == APP_MSG_NOT_CONNECTED) {
@@ -478,12 +494,12 @@ void send_failed(DictionaryIterator *failed, AppMessageResult reason, void *cont
 	
 	if(reason == APP_MSG_SEND_TIMEOUT) {
 		text_layer_set_text(&text_status_layer, "T.Out");
-		if(inTimeOut == 0) {
-			inTimeOut = 1;
-		}
 		if(inTimeOut == 1) {
 			vibes_double_pulse();
 			inTimeOut = 2;
+		}
+		if(inTimeOut == 0) {
+			inTimeOut = 1;
 		}
 	}
 	
@@ -500,48 +516,48 @@ void send_failed(DictionaryIterator *failed, AppMessageResult reason, void *cont
 }
  
  
-void select_single_click_handler(ClickRecognizerRef recognizer, Window *window) {
+static void select_single_click_handler(ClickRecognizerRef recognizer, Window *window) {
   (void)recognizer;
   (void)window;
  
     sendCommand(SM_PLAYPAUSE_KEY);
 }
  
-void select_long_click_handler(ClickRecognizerRef recognizer, Window *window) {
+static void select_long_click_handler(ClickRecognizerRef recognizer, Window *window) {
   (void)recognizer;
   (void)window;
  
     sendCommand(SM_FIND_MY_PHONE_KEY);
 }
  
-void select_up_handler(ClickRecognizerRef recognizer, Window *window) {
+static void select_up_handler(ClickRecognizerRef recognizer, Window *window) {
   (void)recognizer;
   (void)window;
  
 }
  
  
-void select_down_handler(ClickRecognizerRef recognizer, Window *window) {
+static void select_down_handler(ClickRecognizerRef recognizer, Window *window) {
   (void)recognizer;
   (void)window;
 }
  
  
-void up_single_click_handler(ClickRecognizerRef recognizer, Window *window) {
+static void up_single_click_handler(ClickRecognizerRef recognizer, Window *window) {
   (void)recognizer;
   (void)window;
  
     sendCommand(SM_VOLUME_UP_KEY);
 }
  
-void down_single_click_handler(ClickRecognizerRef recognizer, Window *window) {
+static void down_single_click_handler(ClickRecognizerRef recognizer, Window *window) {
   (void)recognizer;
   (void)window;
  
     sendCommand(SM_VOLUME_DOWN_KEY);
 }
  
-void swap_bottom_layer() {
+static void swap_bottom_layer() {
     //on a press of the bottom button, scroll in the next layer
  
     property_animation_init_layer_frame(&ani_out, &animated_layer[active_layer], &GRect(25, 25, 85, 50), &GRect(-85, 25, 85, 50));
@@ -556,7 +572,7 @@ void swap_bottom_layer() {
 }
  
  
-void config_provider(ClickConfig **config, Window *window) {
+static void config_provider(ClickConfig **config, Window *window) {
   (void)window;
  
  
@@ -580,7 +596,7 @@ void config_provider(ClickConfig **config, Window *window) {
  
 }
  
-void handleMinuteTimer() {
+static void handleMinuteTimer() {
 	PblTm t;
 	
     static char date_text[] = "Xxxxxxxxx 00";
@@ -593,10 +609,10 @@ void handleMinuteTimer() {
 	
 	apptDisplay();
 
-	timerMinutes = app_timer_send_event(g_app_context, MINUTE_INTERVAL, TIMER_COOKIE_MINUTE);
+	//timerMinutes = app_timer_send_event(g_app_context, MINUTE_INTERVAL, TIMER_COOKIE_MINUTE);
 }
  
-void battery_layer_update_callback(Layer *me, GContext* ctx) {
+static void battery_layer_update_callback(Layer *me, GContext* ctx) {
      
     //draw the remaining battery percentage
     graphics_context_set_stroke_color(ctx, GColorBlack);
@@ -607,7 +623,7 @@ void battery_layer_update_callback(Layer *me, GContext* ctx) {
 }
  
  
-void handle_status_appear(Window *window)
+static void handle_status_appear(Window *window)
 {
     text_layer_set_text(&text_status_layer, "Hello");
      
@@ -618,10 +634,10 @@ void handle_status_appear(Window *window)
     // Start UI timers  
 	timerSwapBottomLayer = app_timer_send_event(g_app_context, SWAP_BOTTOM_LAYER_INTERVAL, TIMER_COOKIE_LAYERSWAP);
 	timerUpdateGps = app_timer_send_event(g_app_context, updateGPSInterval, TIMER_COOKIE_GPS);
-	timerMinutes = app_timer_send_event(g_app_context, MINUTE_INTERVAL, TIMER_COOKIE_MINUTE);
+	//timerMinutes = app_timer_send_event(g_app_context, MINUTE_INTERVAL, TIMER_COOKIE_MINUTE);
 }
  
-void handle_status_disappear(Window *window)
+static void handle_status_disappear(Window *window)
 {
     text_layer_set_text(&text_status_layer, "Bye");
      
@@ -632,10 +648,10 @@ void handle_status_disappear(Window *window)
     app_timer_cancel_event(g_app_context, timerUpdateWeather);
     app_timer_cancel_event(g_app_context, timerSwapBottomLayer);
     app_timer_cancel_event(g_app_context, timerUpdateGps);
-    app_timer_cancel_event(g_app_context, timerMinutes);
+    //app_timer_cancel_event(g_app_context, timerMinutes);
 }
  
-void handle_init(AppContextRef ctx) {
+static void handle_init(AppContextRef ctx) {
     (void)ctx;
  
     g_app_context = ctx;
@@ -748,7 +764,7 @@ void handle_init(AppContextRef ctx) {
     layer_add_child(&weather_layer, &weather_tomorrow_image.layer);
     bitmap_layer_set_bitmap(&weather_tomorrow_image, &weather_status_small_imgs[0].bmp);
  
-    text_layer_init(&text_weather_tomorrow_temp_layer, GRect(108, 18, 31, 20)); // GRect(5, 2, 47, 40)
+    text_layer_init(&text_weather_tomorrow_temp_layer, GRect(108, 18, 36, 20)); // GRect(5, 2, 47, 40)
     text_layer_set_text_alignment(&text_weather_tomorrow_temp_layer, GTextAlignmentRight);
     text_layer_set_text_color(&text_weather_tomorrow_temp_layer, GColorWhite);
     text_layer_set_background_color(&text_weather_tomorrow_temp_layer, GColorClear);
@@ -761,9 +777,9 @@ void handle_init(AppContextRef ctx) {
     text_layer_set_text_alignment(&text_date_layer, GTextAlignmentLeft);
     text_layer_set_text_color(&text_date_layer, GColorWhite);
     text_layer_set_background_color(&text_date_layer, GColorClear);
-    layer_set_frame(&text_date_layer.layer, GRect(55, 135, 50, 20));
+    layer_set_frame(&text_date_layer.layer, GRect(55, 130, 50, 20));
     //text_layer_set_font(&text_date_layer, fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_ROBOTO_CONDENSED_21)));
-    text_layer_set_font(&text_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    text_layer_set_font(&text_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
     layer_add_child(&s_data.window.layer, &text_date_layer.layer);
  
  
@@ -853,7 +869,7 @@ void handle_init(AppContextRef ctx) {
     timerUpdateWeatherForecast = app_timer_send_event(g_app_context, 5000 /* milliseconds */, 5);
 }
 
-void handle_deinit(AppContextRef ctx) {
+static void handle_deinit(AppContextRef ctx) {
   (void)ctx;
  
     for (int8_t i=0; i<NUM_WEATHER_IMAGES; i++) {
@@ -911,7 +927,11 @@ void handle_timer(AppContextRef ctx, AppTimerHandle handle, uint32_t cookie) {
 }
  
 static void handle_second_tick(AppContextRef ctx, PebbleTickEvent* t) {
-  layer_mark_dirty(&s_data.window.layer);
+	if(t->tick_time->tm_sec == 0) {
+		handleMinuteTimer();
+	}
+	
+  	layer_mark_dirty(&s_data.window.layer);
 }
  
 void pbl_main(void *params) {
